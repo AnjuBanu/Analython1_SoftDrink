@@ -1,0 +1,488 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+
+```{r}
+
+
+# Loading the necessary packages 
+packages <- c('dplyr','ggplot2','tidyverse','readxl','plotly','tidyr','readxl','corrplot','naniar','Rcpp','caret','caTools','factoextra','visdat','cvms','dplyr','prophet','roll','xgboost','Ckmeans.1d.dp')
+
+install_package <- packages %in% row.names(installed.packages())
+if (any (install_package ==  FALSE))
+  install.packages(packages[!install_package])
+
+sapply(packages, require, character.only = TRUE)
+
+
+threshold=0.7 # Change the threshold values 
+opt=-0.8574
+max_opt=-0.8574+threshold
+min_opt=-0.8574-threshold
+
+```
+
+
+
+```{r}
+data <- read_excel( "AAL_A1_task.xlsx")
+
+data = data %>% 
+  mutate_if(is.character,as.numeric) 
+
+data = data[,-nearZeroVar(data)]
+
+data = data %>%
+  dplyr::select (starts_with('datetime'),starts_with('g1'),starts_with('g2'),starts_with('g3'),starts_with('g4_var_2'))
+
+
+data = data %>%
+ filter (!is.na(g4_var_2))
+
+data = data %>%
+rename(target=g4_var_2)
+
+```
+
+```{r}
+
+data %>%
+  ggplot(aes(x=datetime, y=target)) +
+  geom_line()+
+  annotate("rect", xmin = min(data$datetime), xmax = max(data$datetime), ymin = (opt+threshold), ymax =(opt-threshold), 
+           alpha = .2, fill="blue")+
+  geom_line(aes(x=datetime, y=opt, col="red"))+
+  labs(x="",title="Data with optima -0.8574 and threshold window 0.5")+
+  ylab("g4_var_2(Target)")+
+    theme(legend.title = element_blank())+
+    theme_minimal()
+
+  
+```
+
+
+```{r}
+
+
+                 
+data %>%
+  ggplot(aes(x=datetime, y=target)) +
+  geom_line()+
+  annotate("rect", xmin = as.POSIXct(pivot_date1), xmax = max(data$datetime), ymin = -3, ymax = 5, alpha = .2)+
+  annotate(geom="text", x=as.POSIXct("2021-04-1"), y=3.5, label="Training Data",
+              color="red")+
+  annotate(geom="text", x=as.POSIXct("2021-06-10"), y=3.5, label="Test Data",
+              color="red")+
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))+
+  theme_minimal()+
+  labs(x="",title = paste("Splitting of testing and train data at Pivotal point  ",pivot_date1))+
+  ylab("g4_var_2(Target)") 
+
+```
+
+
+```{r}
+
+# FUnctions to create lags /  rolling mean / rolling standarad deviation
+Create_lags <- function (df, start_lag, num_lag){
+  lag = seq(from = start_lag, to=start_lag+num_lag)
+  lag_names <- paste("lag", formatC(lag, width=nchar(max(lag)), flag ="0"), sep="_")
+  
+  lag_function = setNames(paste("dplyr::lag(.,", lag,")"), lag_names)
+  print(lag_function)  
+  df = df %>%
+    mutate_at(vars(target), funs_(lag_function))
+  print(colnames(df))
+  return (df)
+}
+
+Create_rollingWindow_means <- function(df, start_index, num_windows){
+  role_mean_1 = seq(from = start_index, to=start_index+num_windows)
+  rol_names <- paste("rolmean", formatC(role_mean_1, width=nchar(max(role_mean_1)), flag ="0"), sep="_")
+  
+  rolmean_function = setNames(paste("lag(roll_mean(., ", role_mean_1,")",",1)"), rol_names)
+  print(rolmean_function)  
+  df = df %>%
+    mutate_at(vars(target), funs_(rolmean_function))
+  print(colnames(df))
+  return (df)
+  
+}
+
+Create_rollingWindow_sd <- function(df, start_index, num_windows){
+  role_sd_1 = seq(from = start_index, to=start_index+num_windows)
+  rol_names <- paste("rollsd", formatC(role_sd_1, width=nchar(max(role_sd_1)), flag ="0"), sep="_")
+  
+  rolsd_function = setNames(paste("lag(roll_sd(., ", role_sd_1,")",",1)"), rol_names)
+  print(rolsd_function)  
+  df = df %>%
+    mutate_at(vars(target), funs_(rolsd_function))
+  print(colnames(df))
+  return (df)
+  
+}
+
+
+```
+
+
+
+```{r}
+
+# Hyper parameters whcih can be modified 
+start_index_lag=1
+num_lags=4
+start_index_roll=3
+numm_roll=2
+forecast_horizon= 4
+
+
+data_1 <- data %>%
+  Create_lags(.,start_index_lag,num_lags)%>% # Creating lags(15min, 30 min, 45 min) on  target variables
+  Create_rollingWindow_means(.,start_index_roll,numm_roll)%>%  # Creating rollign mean with lags
+  Create_rollingWindow_sd (.,start_index_roll,numm_roll) # Can ginore this, as didnt show any importance
+
+data_1 
+
+
+```
+
+```{r}
+data_1 = na.omit(data_1)
+data_1
+dim(data_1)
+```
+
+
+```{r}
+pivot_date1 = "2021-05-25"
+
+X_train = data_1 %>%
+  mutate (date = as.Date(datetime, format="%d%m%Y")) %>%
+  filter (date <= pivot_date1)%>%
+  dplyr::select (-date)
+
+X_test = data_1 %>%
+ mutate (date = as.Date(datetime, format="%d%m%Y")) %>%
+  filter (date > pivot_date1)%>%
+  dplyr::select (-date)
+
+
+ print(dim(X_train))
+ print(dim(X_test))
+ 
+ head(X_train)
+ 
+```
+
+
+
+```{r}
+
+pivot_date2 = "2021-05-1"
+
+train_data= X_train %>%
+  mutate (date = as.Date(datetime, format="%d%m%Y")) %>%
+  filter (date <= pivot_date2)%>%
+  dplyr::select (-date)
+
+val_data = X_train %>%
+ mutate (date = as.Date(datetime, format="%d%m%Y")) %>%
+  filter (date > pivot_date2)%>%
+ dplyr:: select (-date)
+
+
+ print(dim(train_data))
+ print(dim(val_data))
+ 
+ head(X_train)
+ 
+```
+
+
+```{r}
+
+set.seed(314)
+
+dtrain = xgb.DMatrix(data=data.matrix(dplyr::select (train_data,-target)), label=(train_data$target))
+dtest = xgb.DMatrix(data=data.matrix(dplyr::select (val_data,-target)), label=(val_data$target))
+
+```
+
+```{r}
+set.seed(314)
+watchlist = list(train=dtrain,val=dtest)
+
+param = list (objective = "reg:linear",
+              booster = "gbtree",
+              eta = 0.1,
+              max_depth = 6,
+              subsample = 0.7,
+              colsample_bytree = 0.7,
+              gamma = 0.1
+              )
+clf <- xgb.cv(params=param, data=dtrain, nrounds=100,
+                 verbose = 1, early_stopping_rounds=50, nfold = 5, 
+                maximize = FALSE,showsd = T)
+
+```
+
+
+```{r}
+set.seed(314)
+watchlist = list(train=dtrain,val=dtest)
+
+param = list (objective = "reg:linear",
+              booster = "gbtree",
+              eta = 0.1,
+              max_depth = 6,
+              subsample = 0.7,
+              colsample_bytree = 0.7,
+              gamma = 0.1
+              )
+clf <- xgb.train(params=param, data=dtrain, nrounds=45,
+                 verbose = 1, early_stopping_rounds=10, watchlist=watchlist,
+                 maximize = FALSE, eval='rmse')
+
+clf$best_score
+
+```
+
+```{r}
+
+# optional code by updating the excel sheet with above generated rmse values
+rmse <- read_excel("rmse.xlsx")
+
+rmse %>%
+  ggplot()+
+  geom_line(aes(x=seq(1,46), y=Train,col="blue"),size=1)+
+   geom_line(aes(x=seq(1,46), y=Validation,col="red"),size=1)+
+  ylab("RMSE")+
+  xlab("No Of Itterations")+
+  theme_classic()
+
+```
+
+
+```{r}
+
+
+importance = xgb.importance(feature_names = names(dplyr::select(X_train, -target)), model=clf)
+xgb.ggplot.importance(importance_matrix= importance[1:15])
+
+```
+
+
+
+```{r}
+val = dplyr::select (val_data, -target)
+
+predict = predict(clf, data.matrix(val))
+
+d <- tibble (pred_cat=ifelse((predict<max_opt & predict>min_opt),1,0), obs_cat = ifelse((val_data$target<max_opt & val_data$target>min_opt),1,0)) %>%
+  mutate(predict=predict,observed=(val_data$target))%>%
+  mutate (resid = predict-observed, resid_sq = resid^2)
+
+
+
+sstol<- sum((d$predict - mean(d$observed))^2)
+ssresid <- sum(d$resid_sq)
+rmse <- mean((d$predict - d$observed)^2)
+
+paste("Total Sum of Square",round(sstol,2))
+paste("Sum of Residual Square", round(ssresid,2))
+paste("Root mean sqaure error",round(rmse,2))
+
+
+
+  ggplot(d,aes(x=predict,y=observed))+
+  geom_point()+
+  geom_smooth(method = "lm", size=1, aes(col="red"))+
+  labs(x="Predicted Output",y="Actual Output",title ="XGBoost: Actual vs.Predicted")+
+  theme_minimal()+
+    theme(legend.title=element_blank(),legend.position="upper")
+  
+  ggplot(d,aes(x=predict,y=resid))+
+  geom_point()+
+  geom_smooth(method = "lm", size=1, aes(col="red"))+
+  labs(x="Predicted Output",y="Residual Output",title="XGBoost: Actual vs.Residual")+
+  theme_minimal()+
+    theme(legend.title=element_blank(),legend.position="upper")
+  
+
+```
+```{r}
+
+# confision matrix for the validation data (biased)
+
+confusionMatrix (as.factor(d$pred_cat),as.factor(d$obs_cat))
+
+
+conf <- tibble("target" = d$obs_cat,
+                     "prediction" = d$pred_cat)
+conf_table <- table(conf)
+
+cfm <- as_tibble(conf_table)
+plot_confusion_matrix(cfm, 
+                      target_col = "target", 
+                      prediction_col = "prediction",
+                      counts_col = "n")
+
+```
+
+```{r}
+
+train_predict <- X_train %>%
+  mutate(predict = predict(clf, data.matrix(dplyr::select (X_train,-target))))
+
+train_predict %>%
+  ggplot()+
+  geom_line(aes(x=datetime,y=target),color="black")+
+  geom_line(aes(x=datetime,y=predict,color="red") )+
+  theme_classic()+
+  theme(legend.title = element_blank(),legend.position = c(0.2, 0.9))
+
+
+```
+
+```{r}
+val_predict <- val_data %>%
+  mutate(predict = predict(clf, data.matrix(dplyr::select (val_data,-target))))
+
+val_predict %>%
+  ggplot()+
+  geom_line(aes(x=datetime,y=target))+
+  geom_line(aes(x=datetime,y=predict, color="red"))+
+   theme_classic()
+
+```
+
+
+```{r}
+# This code is to perform recursive forecasting and needs few more changed to make it work perfectly.
+# Currently the code is incomplete
+
+#max(data$datetime)
+#max(data_1$datetime)
+#max(forcast_dates)
+
+#forcast_dates =as.POSIXct( format(seq(as.POSIXct(max(X_train$datetime)), length.out=100,  by='15 min'), #'%Y-%m-%d %H:%M:00'),tz = "UCT")
+
+#for (i in 2:length(forcast_dates)){
+ 
+  
+#  df_test <- data_copy %>%
+#    filter (datetime <= forcast_dates[i])
+  
+#  df_test<- df_test%>%
+#  Create_lags(.,start_index_lag,num_lags)%>%
+#  Create_rollingWindow_means(.,start_index_roll,numm_roll)%>%
+ # Create_rollingWindow_sd (.,start_index_roll,numm_roll)
+  
+#  df_test = na.omit(df_test)
+  
+#  test = df_test[df_test$datetime == (forcast_dates[i]),] %>%
+#    select (-target)
+  
+#  pred1 = predict(clf, data.matrix(test))
+#  test$target = round(pred1,2)                                   
+#  print(test$target)
+  
+#  data_copy <- data_copy %>%
+#  left_join(.,test, by=names(data_copy))
+#}
+
+```
+
+
+
+```{r}
+# Performing one shot predictions
+
+predict = predict(clf, data.matrix(dplyr::select (X_test, -target)))
+
+
+t <- tibble (pred_cat=ifelse((predict<max_opt & predict>min_opt),1,0), obs_cat = ifelse((X_test$target<max_opt & X_test$target>min_opt),1,0)) %>%
+  mutate(predict=predict,observed=(X_test$target))%>%
+  mutate (resid = predict-observed, resid_sq = resid^2)
+
+sstol<- sum((t$predict - mean(t$observed))^2)
+ssresid <- sum(t$resid_sq)
+rmse <- mean((t$predict - t$observed)^2)
+
+paste("Total Sum of Square",round(sstol,2))
+paste("Sum of Residual Square", round(ssresid,2))
+paste("Root mean sqaure error",round(rmse,2))
+
+test_predict <- X_test %>%
+  mutate(predict = predict(clf, data.matrix(dplyr::select (X_test, -target))))
+
+test_predict %>%
+  ggplot()+
+  geom_line(aes(x=datetime,y=target),color="black")+
+  geom_line(aes(x=datetime,y=predict,color="red") )+
+  theme_classic()+
+  theme(legend.title = element_blank(),legend.position = c(0.2, 0.2))
+
+
+  ggplot(d,aes(x=predict,y=observed))+
+  geom_point()+
+  geom_smooth(method = "lm", size=1, aes(col="red"))+
+  labs (title = "XGBoost: Residual vs. Prediction")+
+  ylab("Actual Output")+
+  xlab("Predicted Output")
+  
+  
+  
+    ggplot(d,aes(x=predict,y=resid))+
+  geom_point()+
+  geom_smooth(method = "lm", size=1, aes(col="red"))+
+  ylab("Residual Output")+
+  xlab("Predicted Output")+
+  labs (title = "XGBoost: Residual vs. Prediction")
+
+```
+
+```{r}
+# confusion matrix for test data
+
+confusionMatrix (as.factor(t$pred_cat),as.factor(t$obs_cat))
+```
+
+```{r}
+
+
+conf <- tibble("target" = t$obs_cat,
+                     "prediction" = t$pred_cat)
+conf_table <- table(conf)
+
+cfm <- as_tibble(conf_table)
+plot_confusion_matrix(cfm, 
+                      target_col = "target", 
+                      prediction_col = "prediction",
+                      counts_col = "n")
+
+```
+
+
+
+```{r}
+# ROC curve generation
+predict_test = predict(clf, data.matrix(dplyr::select (X_test, -target)))
+
+predict_test = predict_test %>%
+  as.data.frame()%>%
+  mutate("prob"=predict_test)%>%
+  mutate(target = ifelse((X_test$target<max_opt & X_test$target>min_opt),1,0))
+  
+
+colAUC(predict_test$prob, predict_test$target, plotROC = TRUE)
+
+```
+
+
+
